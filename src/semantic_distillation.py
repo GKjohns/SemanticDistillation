@@ -56,11 +56,17 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 
-# Local imports
-from features import DEFAULT_FEATURES, FeatureSet
-from schemas import build_pydantic_model, ResidualAnalysis
-from utils import setup_logging, FeatureCache, RateLimiter, save_results, save_features_csv
-from data import load_data
+# Local imports (support both package and direct usage)
+try:
+    from .features import DEFAULT_FEATURES, FeatureSet
+    from .schemas import build_pydantic_model, ResidualAnalysis
+    from .utils import setup_logging, FeatureCache, RateLimiter, save_results, save_features_csv
+    from .data import load_data
+except ImportError:
+    from features import DEFAULT_FEATURES, FeatureSet
+    from schemas import build_pydantic_model, ResidualAnalysis
+    from utils import setup_logging, FeatureCache, RateLimiter, save_results, save_features_csv
+    from data import load_data
 
 
 # ---------------------------------------------------------------------------
@@ -368,15 +374,20 @@ Feature set: {self.feature_set.name}
         if log:
             log.info(f"Label mapping: {label_map}")
 
+        # Determine safe number of CV splits based on smallest class count
+        min_class_count = min(y_enc.value_counts())
+        safe_inner_cv = max(2, min(3, min_class_count))
+        safe_outer_cv = max(2, min(n_folds, min_class_count, len(y) // 2))
+
         # Cross-validation
-        cv = StratifiedKFold(n_splits=min(n_folds, len(y) // 2), shuffle=True, random_state=42)
+        cv = StratifiedKFold(n_splits=safe_outer_cv, shuffle=True, random_state=42)
 
         pipe = Pipeline([
             ("imputer", SimpleImputer(strategy="median")),
             ("scaler", StandardScaler()),
             ("model", LogisticRegressionCV(
                 Cs=[0.01, 0.1, 1.0, 10.0],  # Less aggressive regularization range
-                cv=3,
+                cv=safe_inner_cv,
                 l1_ratios=(0.5,),  # Elastic net (mix of L1 and L2)
                 solver="saga",
                 max_iter=5000,
