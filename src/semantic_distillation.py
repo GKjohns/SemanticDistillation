@@ -60,12 +60,12 @@ from sklearn.pipeline import Pipeline
 try:
     from .features import DEFAULT_FEATURES, FeatureSet
     from .schemas import build_pydantic_model, ResidualAnalysis
-    from .utils import setup_logging, FeatureCache, RateLimiter, save_results, save_features_csv
+    from .utils import setup_logging, FeatureCache, RateLimiter, save_results, save_features_csv, compute_feature_config_hash
     from .data import load_data
 except ImportError:
     from features import DEFAULT_FEATURES, FeatureSet
     from schemas import build_pydantic_model, ResidualAnalysis
-    from utils import setup_logging, FeatureCache, RateLimiter, save_results, save_features_csv
+    from utils import setup_logging, FeatureCache, RateLimiter, save_results, save_features_csv, compute_feature_config_hash
     from data import load_data
 
 
@@ -157,6 +157,11 @@ class SemanticDistiller:
         self.feature_config = feature_config if feature_config is not None else DEFAULT_FEATURES
         self.feature_set = FeatureSet(self.feature_config)
         
+        # Compute a stable hash of the feature config for cache scoping.
+        # This ensures that when the feature config changes between iterations,
+        # cached features from the old config are never served.
+        self.feature_config_hash = compute_feature_config_hash(self.feature_config)
+        
         # Build the Pydantic model for structured extraction
         self.FeatureModel = build_pydantic_model(self.feature_config)
         
@@ -197,9 +202,9 @@ class SemanticDistiller:
     def extract_features(self, text: str, post_id: str = "") -> Optional[dict]:
         """Extract features from a single post using structured output."""
 
-        # Check cache if enabled
+        # Check cache if enabled (scoped to current feature config)
         if self.use_cache:
-            cached = self.cache.get(text)
+            cached = self.cache.get(text, self.feature_config_hash)
             if cached is not None:
                 self.log.info(f"  [{post_id}] Cache hit")
                 return cached
@@ -263,9 +268,9 @@ Feature set: {self.feature_set.name}
                     f"({input_tokens}+{output_tokens} tokens)"
                 )
 
-                # Save to cache if enabled
+                # Save to cache if enabled (scoped to current feature config)
                 if self.use_cache:
-                    self.cache.set(text, result)
+                    self.cache.set(text, result, self.feature_config_hash)
                 return result
 
             except Exception as e:

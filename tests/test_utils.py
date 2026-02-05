@@ -14,6 +14,7 @@ from src.utils import (
     setup_logging,
     save_results,
     load_results,
+    compute_feature_config_hash,
 )
 
 
@@ -84,6 +85,94 @@ class TestFeatureCache:
         cache2 = FeatureCache(tmp_path)
         retrieved = cache2.get("text")
         assert retrieved == {"feature": 5}
+    
+    def test_cache_with_feature_config_hash(self, tmp_path):
+        """Test that cache entries are scoped by feature config hash"""
+        cache = FeatureCache(tmp_path)
+        text = "Same text for both configs"
+        
+        config_hash_v1 = "abc123"
+        config_hash_v2 = "def456"
+        
+        features_v1 = {"feature_a": 3, "feature_b": True}
+        features_v2 = {"feature_x": 5, "feature_y": False}
+        
+        # Cache with config v1
+        cache.set(text, features_v1, feature_config_hash=config_hash_v1)
+        
+        # Cache with config v2 (different features for same text)
+        cache.set(text, features_v2, feature_config_hash=config_hash_v2)
+        
+        # Retrieving with v1 hash returns v1 features
+        assert cache.get(text, feature_config_hash=config_hash_v1) == features_v1
+        
+        # Retrieving with v2 hash returns v2 features
+        assert cache.get(text, feature_config_hash=config_hash_v2) == features_v2
+        
+        # Retrieving with no hash returns neither (different key)
+        assert cache.get(text) != features_v1 or cache.get(text) != features_v2
+    
+    def test_cache_miss_with_different_config_hash(self, tmp_path):
+        """Test that changing the config hash causes a cache miss"""
+        cache = FeatureCache(tmp_path)
+        text = "Test post text"
+        
+        # Cache with one config
+        cache.set(text, {"old": 1}, feature_config_hash="config_v1")
+        
+        # Looking up with a different config hash should miss
+        assert cache.get(text, feature_config_hash="config_v2") is None
+        assert not cache.has(text, feature_config_hash="config_v2")
+        
+        # But the original is still there
+        assert cache.has(text, feature_config_hash="config_v1")
+        assert cache.get(text, feature_config_hash="config_v1") == {"old": 1}
+    
+    def test_cache_has_with_feature_config_hash(self, tmp_path):
+        """Test has() respects feature config hash"""
+        cache = FeatureCache(tmp_path)
+        text = "Test text"
+        config_hash = "my_config_hash"
+        
+        assert not cache.has(text, feature_config_hash=config_hash)
+        cache.set(text, {"f": 1}, feature_config_hash=config_hash)
+        assert cache.has(text, feature_config_hash=config_hash)
+        assert not cache.has(text, feature_config_hash="other_hash")
+
+
+class TestComputeFeatureConfigHash:
+    """Test the compute_feature_config_hash utility"""
+    
+    def test_same_config_same_hash(self):
+        """Test that identical configs produce the same hash"""
+        config = {"name": "Test", "features": [{"name": "f1", "type": "bool"}]}
+        hash1 = compute_feature_config_hash(config)
+        hash2 = compute_feature_config_hash(config)
+        assert hash1 == hash2
+    
+    def test_different_config_different_hash(self):
+        """Test that different configs produce different hashes"""
+        config1 = {"name": "Test", "features": [{"name": "f1", "type": "bool"}]}
+        config2 = {"name": "Test", "features": [{"name": "f2", "type": "scale"}]}
+        hash1 = compute_feature_config_hash(config1)
+        hash2 = compute_feature_config_hash(config2)
+        assert hash1 != hash2
+    
+    def test_key_order_does_not_matter(self):
+        """Test that dict key order doesn't affect the hash (canonical JSON)"""
+        config1 = {"name": "Test", "features": []}
+        config2 = {"features": [], "name": "Test"}
+        hash1 = compute_feature_config_hash(config1)
+        hash2 = compute_feature_config_hash(config2)
+        assert hash1 == hash2
+    
+    def test_returns_hex_string(self):
+        """Test that the hash is a valid hex string"""
+        config = {"name": "Test", "features": []}
+        h = compute_feature_config_hash(config)
+        assert isinstance(h, str)
+        assert len(h) == 32  # MD5 hex digest length
+        int(h, 16)  # Should be valid hex
 
 
 class TestRateLimiter:

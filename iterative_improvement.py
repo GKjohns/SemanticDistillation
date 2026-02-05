@@ -774,17 +774,42 @@ class IterativeImprover:
         """
         Fit model on train set and evaluate on validation set.
         
-        Returns (results_dict, fitted_model)
+        Returns (results_dict, fitted_model).
+        
+        The results_dict includes 'val_preds' (encoded int predictions) and
+        'val_pred_probs' (class probabilities) from the actual fitted model,
+        so per-class metrics can be computed from the real train->validate
+        predictions rather than from a separately-fit model.
         """
         # Build feature matrices
         X_train, feature_names = SemanticDistiller.build_feature_matrix(train_features)
         X_val, _ = SemanticDistiller.build_feature_matrix(val_features)
         
-        # Ensure validation has same columns as train
-        missing_cols = set(X_train.columns) - set(X_val.columns)
-        for col in missing_cols:
-            X_val[col] = 0
-        X_val = X_val[X_train.columns]  # Ensure same column order
+        # Align validation columns to match training columns (see 1.3 fix below)
+        missing_in_val = set(X_train.columns) - set(X_val.columns)
+        extra_in_val = set(X_val.columns) - set(X_train.columns)
+        
+        if missing_in_val:
+            logging.getLogger("distill").warning(
+                f"Validation missing {len(missing_in_val)} columns present in train "
+                f"(filling with 0): {sorted(missing_in_val)}"
+            )
+            for col in missing_in_val:
+                X_val[col] = 0
+        
+        if extra_in_val:
+            logging.getLogger("distill").warning(
+                f"Validation has {len(extra_in_val)} extra columns not in train "
+                f"(dropping): {sorted(extra_in_val)}"
+            )
+        
+        X_val = X_val[X_train.columns]  # Ensure same column order, drop extras
+        
+        # Sanity assertion: columns must now match exactly
+        assert list(X_train.columns) == list(X_val.columns), (
+            f"Column mismatch after alignment! "
+            f"Train cols: {list(X_train.columns)}, Val cols: {list(X_val.columns)}"
+        )
         
         # Align labels with features
         train_labels = train_labels.loc[train_labels.index.astype(str).isin(X_train.index.astype(str))]
@@ -792,6 +817,7 @@ class IterativeImprover:
         
         # Encode labels
         label_map = {label: i for i, label in enumerate(sorted(train_labels.unique()))}
+        reverse_label_map = {v: k for k, v in label_map.items()}
         y_train = train_labels.map(label_map)
         y_val = val_labels.map(label_map)
         
@@ -816,8 +842,9 @@ class IterativeImprover:
         ])
         pipe.fit(X_train, y_train)
         
-        # Evaluate on validation
+        # Evaluate on validation using the ACTUAL fitted model
         val_preds = pipe.predict(X_val)
+        val_pred_probs = pipe.predict_proba(X_val)
         val_accuracy = (val_preds == y_val.values).mean()
         
         # Also get CV score on train for comparison
@@ -844,7 +871,13 @@ class IterativeImprover:
             "n_nonzero_features": int((np.abs(coefs) > 1e-6).sum()),
             "regularization_C": float(model.C_[0]),
             "label_map": label_map,
+            "reverse_label_map": reverse_label_map,
             "feature_columns": list(X_train.columns),  # Store column names for later use
+            # Return actual validation predictions for per-class metrics (fix 1.2)
+            "val_preds": val_preds,
+            "val_pred_probs": val_pred_probs,
+            "y_val": y_val.values,
+            "val_index": list(X_val.index),
         }
         
         return results, pipe
@@ -1149,25 +1182,49 @@ Rules for proposed features:
         # Log feature coefficients
         self.verbose_logger.log_coefficients(eval_results['coefficients'])
         
-        # Step 4: Analyze predictions on validation set (where we evaluate)
+        # Step 4: Analyze predictions on validation set using ACTUAL fitted model
+        # (Fix 1.2: Previously this called get_predictions_with_details() which
+        #  fit a SEPARATE model on the validation data and predicted on that same
+        #  data. Now we use the actual train->validate predictions from the fitted
+        #  model returned by fit_and_evaluate_split().)
         print("\n[4/5] Analyzing validation predictions with LLM...")
-        val_predictions_df = get_predictions_with_details(
-            val_features,
-            val_labels,
-            self.validation_df.set_index("id")["body"],
-        )
+        
+        # Build predictions DataFrame from actual model outputs
+        reverse_label_map = eval_results['reverse_label_map']
+        val_preds_encoded = eval_results['val_preds']
+        val_pred_probs = eval_results['val_pred_probs']
+        val_true_encoded = eval_results['y_val']
+        val_idx = eval_results['val_index']
+        
+        val_texts = self.validation_df.set_index("id")["body"]
+        val_texts.index = val_texts.index.astype(str)
+        
+        val_predictions_df = pd.DataFrame({
+            "text": [val_texts.loc[str(idx)] if str(idx) in val_texts.index else "" for idx in val_idx],
+            "true_label": [reverse_label_map[t] for t in val_true_encoded],
+            "predicted_label": [reverse_label_map[p] for p in val_preds_encoded],
+            "correct": val_preds_encoded == val_true_encoded,
+            "confidence": val_pred_probs.max(axis=1),
+        }, index=[str(idx) for idx in val_idx])
+        
+        # Add feature values for the sample analysis prompt
+        val_features.index = val_features.index.astype(str)
+        for col in val_features.columns:
+            str_idx = [str(idx) for idx in val_idx]
+            val_predictions_df[f"feat_{col}"] = val_features.loc[
+                val_features.index.isin(str_idx), col
+            ].reindex(str_idx).values
         
         n_correct = val_predictions_df["correct"].sum()
         n_total = len(val_predictions_df)
         print(f"      Validation Correct: {n_correct}/{n_total} ({n_correct/n_total*100:.1f}%)")
         
-        # Compute and log per-class metrics
+        # Compute per-class metrics from the ACTUAL fitted model's predictions
         class_names = sorted(val_labels.unique())
         label_to_idx = {label: i for i, label in enumerate(class_names)}
-        y_true = val_predictions_df["true_label"].map(label_to_idx).values
-        y_pred = val_predictions_df["predicted_label"].map(label_to_idx).values
-        
-        per_class_metrics = compute_per_class_metrics(y_true, y_pred, class_names)
+        per_class_metrics = compute_per_class_metrics(
+            val_true_encoded, val_preds_encoded, class_names
+        )
         
         # Print per-class metrics to console
         print(f"      Per-class metrics:")
