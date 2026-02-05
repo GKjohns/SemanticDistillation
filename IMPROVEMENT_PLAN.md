@@ -117,7 +117,7 @@ The broad analysis is run once per session (cheap — just text, no extraction) 
 
 ## Part 3: Improving Self-Assessment
 
-### 3.1 Larger, Smarter Validation Design
+### 3.1 Larger, Smarter Validation Design ✅ **COMPLETED** (Macro F1)
 
 **Current state:** 74 train samples, 99-124 validation samples. Train CV is noisy (std 0.06-0.14). The validation set is fixed, which is good, but with only ~20 YTA samples, per-class metrics are extremely noisy.
 
@@ -125,7 +125,7 @@ The broad analysis is run once per session (cheap — just text, no extraction) 
 - **Increase validation size** to 200+ if the dataset allows. The current dataset has ~5000 samples, so there's room.
 - **Increase train sample size** to 100-150 per fold. The cost per sample is very low (~$0.0001 with gpt-5-mini).
 - **Report confidence intervals** on validation accuracy using bootstrap or Wilson intervals. Don't trust a 2pp improvement when SE is 4pp.
-- **Use macro F1 as primary metric** instead of accuracy, since the class balance is ~80/20 NTA/YTA. A model predicting all-NTA gets 80% accuracy.
+- ✅ **Use macro F1 as primary metric** instead of accuracy, since the class balance is ~80/20 NTA/YTA. A model predicting all-NTA gets 80% accuracy.
   - **Empirical reminder:** In run `20260205_141120`, held-out test accuracy was ~0.57 despite ~80/20 class balance — accuracy alone is not a sensible optimization target under class imbalance + balanced class weighting.
 
 ### 3.2 Statistical Significance Gate for Feature Changes
@@ -134,7 +134,7 @@ The broad analysis is run once per session (cheap — just text, no extraction) 
 
 **Proposed change:** After each iteration, compare the new feature set's validation performance against the previous best using a simple significance test (e.g., McNemar's test on paired predictions, or bootstrap confidence interval on accuracy difference). Only accept changes that show at least a non-negative trend. If the change hurts, revert.
 
-### 3.3 Ablation-Aware Feature Evaluation
+### 3.3 Ablation-Aware Feature Evaluation ✅ **COMPLETED**
 
 **Current state:** Feature importance is judged by L1 coefficient magnitude. But with correlated features, L1 arbitrarily picks one and zeros the other — this doesn't mean the zeroed feature is useless.
 
@@ -149,7 +149,7 @@ The broad analysis is run once per session (cheap — just text, no extraction) 
 Before the iteration loop starts, run a "discovery" step:
 
 ```
-Input: 200 random posts (text + verdict only, no features)
+Input: Decent sized sample of random posts (text + verdict only, no features)
 Prompt: "What patterns distinguish NTA from YTA posts? 
          Focus on narrative structure, framing, social norms, 
          relationship dynamics. Be concrete and specific."
@@ -211,12 +211,12 @@ This lets the LLM distinguish "bad concept" from "bad extraction" and refine des
 5. ✅ **Shift to binary-preferred features** with explicit guidance in prompts (2.3)
 6. ✅ **Allow variable feature count** with dimensionality budget (2.2, 2.4)
 7. **Add feature quality validation** before committing (4.3)
-8. **Switch primary metric to macro F1** with confidence intervals (3.1)
+8. ✅ **Switch primary metric to macro F1** with confidence intervals (3.1)
 
 ### Phase 3: Advanced Modeling (Medium Impact)
 9. **Add R-style formula specification** (2.5)
 10. **Add statistical significance gate** for accepting changes (3.2)
-11. **Add ablation-aware feature evaluation** (3.3)
+11. ✅ **Add ablation-aware feature evaluation** (3.3)
 12. **Show extraction quality diagnostics** to the analysis LLM (4.4)
 
 ### Phase 4: Efficiency & Polish
