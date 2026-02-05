@@ -53,6 +53,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 from sklearn.linear_model import LogisticRegressionCV, LogisticRegression
 from sklearn.model_selection import cross_val_score, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 
 # Local imports
@@ -371,6 +372,7 @@ Feature set: {self.feature_set.name}
         cv = StratifiedKFold(n_splits=min(n_folds, len(y) // 2), shuffle=True, random_state=42)
 
         pipe = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
             ("scaler", StandardScaler()),
             ("model", LogisticRegressionCV(
                 Cs=[0.01, 0.1, 1.0, 10.0],  # Less aggressive regularization range
@@ -456,6 +458,7 @@ Feature set: {self.feature_set.name}
 
         # Fit model
         pipe = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
             ("scaler", StandardScaler()),
             ("model", LogisticRegression(
                 l1_ratio=0.5, solver="saga", C=1.0, max_iter=5000, 
@@ -491,6 +494,13 @@ Feature set: {self.feature_set.name}
         prompt = f"""I'm building a model to predict AITA verdicts from extracted text features.
 The following posts were MISCLASSIFIED by my current model.
 
+IMPORTANT CONTEXT: The verdict labels (NTA, YTA, etc.) are NOT objective moral truth.
+They represent the CROWD CONSENSUS - the weighted aggregate of Reddit commenters' votes.
+Our goal is to predict what the crowd will say, not what is objectively "right."
+The crowd may have biases, respond to certain writing styles, or follow patterns that
+don't align with an objective moral assessment. Features should capture what influences
+crowd perception, not what "should" influence it.
+
 Current features: {feature_names}
 
 Misclassified examples:
@@ -498,19 +508,20 @@ Misclassified examples:
 
 Analyze what patterns exist in these misclassifications. What aspects of these
 texts are NOT captured by the current feature set? Suggest 3-5 new features
-that could help the model distinguish these cases correctly.
+that could help the model predict the crowd's verdict more accurately.
 
 Each new feature should be:
 - Extractable purely from the text (no outcome leakage)
 - Distinct from existing features
-- Specific and well-defined enough to extract reliably"""
+- Specific and well-defined enough to extract reliably
+- Focused on what influences crowd perception (which may differ from objective assessment)"""
 
         try:
             t0 = time.time()
             response = self.client.responses.parse(
                 model=self.model,
                 input=[
-                    {"role": "system", "content": "You are a data scientist analyzing model failures to improve feature engineering."},
+                    {"role": "system", "content": "You are a data scientist analyzing model failures to improve feature engineering. Remember: you're predicting crowd consensus, not objective moral truth."},
                     {"role": "user", "content": prompt},
                 ],
                 text_format=ResidualAnalysis,
