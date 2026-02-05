@@ -1003,6 +1003,10 @@ Rules for proposed features:
   * What narrative techniques might sway crowd opinion?
   * What biases or patterns does the Reddit crowd tend to exhibit?
 - AVOID overly specific or sparse features that would only apply to a small subset of samples (e.g., "happened_in_nevada", "involves_wedding"). Prefer features that capture general behavioral/psychological patterns applicable across many situations.
+- STRONGLY PREFER scale or bool types over categorical. We are sample-size constrained due to evaluation costs, and high-cardinality categoricals blow up the feature space (each category becomes a separate one-hot column), reducing statistical power.
+  * If you want to capture "is any of these patterns present", use a BOOL, not a categorical listing them all.
+  * If you must use categorical, limit to 2-4 broad buckets maximum (e.g., "low/medium/high" or "self/other/mutual").
+  * A categorical with 5+ values is almost never appropriate for this problem.
 - AVOID these already-tried feature names: {', '.join(self.tried_features) if self.tried_features else 'none'}
 """
         
