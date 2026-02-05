@@ -40,7 +40,7 @@ The `SemanticDistiller` should compute a stable hash of its feature config and p
 
 ## Part 2: Structural Issues with the Learning Loop
 
-### 2.1 Sample Analysis Overfits to ~10 Examples
+### 2.1 Sample Analysis Overfits to ~10 Examples ✅ **COMPLETED**
 
 **Current state:** `analyze_samples()` shows the LLM 5 correct + 5 incorrect samples. The LLM constructs elaborate theories from these 10 examples and proposes hyper-specific features (e.g., a 9-category `canonical_trope_cluster`).
 
@@ -56,7 +56,7 @@ The `SemanticDistiller` should compute a stable hash of its feature config and p
 
 The broad analysis is run once per session (cheap — just text, no extraction) and provides a stable anchor so the per-iteration LLM doesn't hallucinate elaborate theories from 10 samples.
 
-### 2.2 Feature Space Explosion (p >> n)
+### 2.2 Feature Space Explosion (p >> n) ✅ **COMPLETED**
 
 **Current state:** 74 training samples, but feature matrices reach 30-41 columns after one-hot encoding categoricals. In run 1, iteration 5: **0/41** features survived L1 regularization (C=0.01). The model literally gave up.
 
@@ -71,7 +71,7 @@ The broad analysis is run once per session (cheap — just text, no extraction) 
 - **Allow the LLM to specify fewer features** — don't force 1:1 swaps. Sometimes removing a bad feature without replacement is better.
 - Track effective dimensionality in the prompt to the analysis LLM so it knows the budget.
 
-### 2.3 Likert Scale Overuse
+### 2.3 Likert Scale Overuse ✅ **COMPLETED**
 
 **Current state:** Almost every feature is a 1-5 scale. Issues:
 - Assumes linearity in logistic regression (effect of 1→2 = effect of 4→5)
@@ -86,7 +86,7 @@ The broad analysis is run once per session (cheap — just text, no extraction) 
 
 **Implementation:** Update the analysis LLM prompt to explicitly prefer binary features, explain WHY (sample size constraints, extraction noise, linearity assumption), and require justification for any non-binary feature.
 
-### 2.4 Fixed Feature Count via Swaps
+### 2.4 Fixed Feature Count via Swaps ✅ **COMPLETED**
 
 **Current state:** `max_swaps` controls how many features change per iteration. Features are always swapped 1:1 — remove N, add N. The total feature count monotonically grows (since categoricals add hidden columns) and can never shrink.
 
@@ -126,6 +126,7 @@ The broad analysis is run once per session (cheap — just text, no extraction) 
 - **Increase train sample size** to 100-150 per fold. The cost per sample is very low (~$0.0001 with gpt-5-mini).
 - **Report confidence intervals** on validation accuracy using bootstrap or Wilson intervals. Don't trust a 2pp improvement when SE is 4pp.
 - **Use macro F1 as primary metric** instead of accuracy, since the class balance is ~80/20 NTA/YTA. A model predicting all-NTA gets 80% accuracy.
+  - **Empirical reminder:** In run `20260205_141120`, held-out test accuracy was ~0.57 despite ~80/20 class balance — accuracy alone is not a sensible optimization target under class imbalance + balanced class weighting.
 
 ### 3.2 Statistical Significance Gate for Feature Changes
 
@@ -206,9 +207,9 @@ This lets the LLM distinguish "bad concept" from "bad extraction" and refine des
 3. ✅ **Add column alignment assertion** between train and validation (1.3)
 
 ### Phase 2: Core Loop Improvements (High Impact)
-4. **Add broad pattern discovery** pre-loop step (4.1)
-5. **Shift to binary-preferred features** with explicit guidance in prompts (2.3)
-6. **Allow variable feature count** with dimensionality budget (2.2, 2.4)
+4. ✅ **Add broad pattern discovery** pre-loop step (4.1)
+5. ✅ **Shift to binary-preferred features** with explicit guidance in prompts (2.3)
+6. ✅ **Allow variable feature count** with dimensionality budget (2.2, 2.4)
 7. **Add feature quality validation** before committing (4.3)
 8. **Switch primary metric to macro F1** with confidence intervals (3.1)
 

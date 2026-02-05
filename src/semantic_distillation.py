@@ -42,6 +42,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import sys
 
 import numpy as np
 import pandas as pd
@@ -115,6 +116,45 @@ MODEL_PRICING = {
 # Core engine
 # ---------------------------------------------------------------------------
 
+class _InlineProgress:
+    """Simple inline progress printer (single-line, no spam)."""
+
+    def __init__(self, total: int, prefix: str = "Progress"):
+        self.total = max(0, int(total))
+        self.prefix = prefix
+        self.done = 0
+        self.ok = 0
+        self.failed = 0
+        self._last_render_len = 0
+
+    def update(self, *, ok_inc: int = 0, failed_inc: int = 0) -> None:
+        self.done += 1
+        self.ok += ok_inc
+        self.failed += failed_inc
+        self.render()
+
+    def render(self) -> None:
+        if self.total <= 0:
+            msg = f"{self.prefix}: {self.done} done | ok={self.ok} failed={self.failed}"
+        else:
+            pct = (self.done / self.total) * 100.0
+            msg = (
+                f"{self.prefix}: {self.done}/{self.total} ({pct:5.1f}%)"
+                f" | ok={self.ok} failed={self.failed}"
+            )
+        # Pad with spaces to fully overwrite previous content.
+        pad = " " * max(0, self._last_render_len - len(msg))
+        sys.stderr.write("\r" + msg + pad)
+        sys.stderr.flush()
+        self._last_render_len = len(msg)
+
+    def close(self) -> None:
+        # End the inline line cleanly.
+        if self._last_render_len:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+
+
 class SemanticDistiller:
     """Extract structured features from text using LLM, fit interpretable models."""
 
@@ -126,8 +166,10 @@ class SemanticDistiller:
         log_dir: str = "logs",
         max_retries: int = 2,
         use_cache: bool = False,
-        max_concurrent: int = 5,
-        requests_per_minute: float = 60.0,
+        max_concurrent: int = 30,
+        requests_per_minute: float = 1200.0,
+        show_progress: bool = True,
+        log_per_item: bool = False,
     ):
         """
         Initialize the SemanticDistiller.
@@ -140,7 +182,7 @@ class SemanticDistiller:
             log_dir: Directory for storing logs and results.
             max_retries: Number of retries for failed extractions.
             use_cache: Whether to use cached extractions. Defaults to False.
-            max_concurrent: Maximum concurrent extraction requests. Defaults to 5.
+            max_concurrent: Maximum concurrent extraction requests. Defaults to 30.
             requests_per_minute: Rate limit for API requests. Defaults to 60 (1/sec).
         """
         self.client = OpenAI()
@@ -152,6 +194,8 @@ class SemanticDistiller:
         self.max_concurrent = max_concurrent
         self.rate_limiter = RateLimiter(requests_per_minute)
         self.extraction_log: list[dict] = []
+        self.show_progress = show_progress
+        self.log_per_item = log_per_item
         
         # Set up feature configuration
         self.feature_config = feature_config if feature_config is not None else DEFAULT_FEATURES
@@ -206,7 +250,8 @@ class SemanticDistiller:
         if self.use_cache:
             cached = self.cache.get(text, self.feature_config_hash)
             if cached is not None:
-                self.log.info(f"  [{post_id}] Cache hit")
+                if self.log_per_item:
+                    self.log.info(f"  [{post_id}] Cache hit")
                 return cached
 
         system_prompt = f"""You are a careful text analyst. Given a Reddit AITA post, 
@@ -263,10 +308,11 @@ Feature set: {self.feature_set.name}
                     },
                 }
                 self.extraction_log.append(entry)
-                self.log.info(
-                    f"  [{post_id}] Extracted in {elapsed:.1f}s "
-                    f"({input_tokens}+{output_tokens} tokens)"
-                )
+                if self.log_per_item:
+                    self.log.info(
+                        f"  [{post_id}] Extracted in {elapsed:.1f}s "
+                        f"({input_tokens}+{output_tokens} tokens)"
+                    )
 
                 # Save to cache if enabled (scoped to current feature config)
                 if self.use_cache:
@@ -299,6 +345,7 @@ Feature set: {self.feature_set.name}
 
         records = []
         failed = []
+        progress = _InlineProgress(total=len(tasks), prefix="Extracting") if self.show_progress else None
         
         # Execute in parallel with ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=self.max_concurrent) as executor:
@@ -316,11 +363,20 @@ Feature set: {self.feature_set.name}
                     if features is not None:
                         features["_id"] = post_id
                         records.append(features)
+                        if progress:
+                            progress.update(ok_inc=1)
                     else:
                         failed.append(post_id)
+                        if progress:
+                            progress.update(failed_inc=1)
                 except Exception as e:
                     self.log.error(f"  [{post_id}] Unexpected error: {e}")
                     failed.append(post_id)
+                    if progress:
+                        progress.update(failed_inc=1)
+        
+        if progress:
+            progress.close()
         
         if failed:
             self.log.warning(f"  Skipped {len(failed)} posts (extraction failed): {failed}")
@@ -685,8 +741,8 @@ def main():
     parser.add_argument("--no-residuals", action="store_true", help="Skip residual analysis")
     parser.add_argument("--use-cache", action="store_true", help="Use cached feature extractions (off by default)")
     parser.add_argument("--clear-cache", action="store_true", help="Clear the cache before running")
-    parser.add_argument("--max-concurrent", type=int, default=20, help="Max concurrent extraction requests (default: 20)")
-    parser.add_argument("--rpm", type=float, default=500.0, help="Rate limit: requests per minute (default: 500)")
+    parser.add_argument("--max-concurrent", type=int, default=30, help="Max concurrent extraction requests (default: 30)")
+    parser.add_argument("--rpm", type=float, default=1200.0, help="Rate limit: requests per minute (default: 1200)")
     args = parser.parse_args()
 
     # Handle cache clearing

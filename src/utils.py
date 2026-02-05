@@ -188,13 +188,13 @@ class RateLimiter:
     at `requests_per_minute` rate. Supports true concurrent requests.
     """
     
-    def __init__(self, requests_per_minute: float = 500.0, bucket_size: int = 50):
+    def __init__(self, requests_per_minute: float = 1200.0, bucket_size: int = 200):
         """
         Initialize the rate limiter.
         
         Args:
-            requests_per_minute: Token refill rate (default 500)
-            bucket_size: Maximum burst size (default 50)
+            requests_per_minute: Token refill rate (default 1200)
+            bucket_size: Maximum burst size (default 200)
         """
         self.requests_per_minute = requests_per_minute
         self.refill_rate = requests_per_minute / 60.0  # tokens per second

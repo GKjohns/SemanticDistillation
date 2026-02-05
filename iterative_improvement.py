@@ -215,6 +215,18 @@ class VerboseLogger:
         self._write("**Key Insight:**")
         self._write(f"> 💡 {key_insight}\n")
     
+    def log_broad_patterns(self, patterns: list[str], sample_size: int):
+        """Log one-time broad pattern discovery output."""
+        self._write("## Broad Pattern Discovery (Pre-Loop)\n")
+        self._write(
+            f"Ran broad pattern discovery on **{sample_size}** posts (text + verdict only). "
+            "These are intended as stable domain priors to ground per-iteration error analysis."
+        )
+        self._write("")
+        for i, p in enumerate(patterns, start=1):
+            self._write(f"{i}. {p}")
+        self._write("\n---\n")
+    
     def log_feature_evaluations(self, evaluations: list[dict]):
         """Log individual feature evaluations."""
         self._write("### Feature Evaluations\n")
@@ -405,7 +417,7 @@ class IterationAnalysis(BaseModel):
     summary: str = Field(..., description="Brief summary of model performance this iteration")
     feature_evaluations: list[FeatureEvaluation] = Field(..., description="Evaluation of each feature")
     features_to_remove: list[str] = Field(..., description="Names of features to swap out (up to max_swaps)")
-    proposed_features: list[ProposedFeature] = Field(..., description="New features to add (same count as removed)")
+    proposed_features: list[ProposedFeature] = Field(..., description="New features to add (variable count)")
     expected_improvement: str = Field(..., description="What improvement we expect from these changes")
 
 
@@ -416,10 +428,115 @@ class SampleAnalysis(BaseModel):
     missing_signals: list[str] = Field(..., description="Signals that could help but aren't captured")
     key_insight: str = Field(..., description="The most important insight for improvement")
 
+class BroadPatternDiscovery(BaseModel):
+    """High-level patterns that distinguish verdicts (run once per session)."""
+    patterns: list[str] = Field(
+        ...,
+        description="10-15 general patterns that distinguish NTA vs YTA posts; concrete but not overly specific to any single example.",
+    )
+
 
 # ---------------------------------------------------------------------------
 # Helper Functions
 # ---------------------------------------------------------------------------
+
+def estimate_feature_effective_dim(feature: dict) -> int:
+    """
+    Estimate effective dimensionality contributed by a single raw feature after encoding.
+    
+    - bool/scale: 1 column
+    - categorical: (k - 1) columns due to one-hot encoding with drop_first=True
+    
+    Note: this is an *upper bound*; in any given fold, unobserved categories may
+    produce fewer columns.
+    """
+    ftype = feature.get("type") or feature.get("feature_type")
+    if ftype == "categorical":
+        values = feature.get("values") or []
+        return max(0, len(values) - 1)
+    # scale / bool / unknown: assume 1
+    return 1
+
+
+def estimate_config_effective_dim(feature_config: dict) -> int:
+    """Estimate total effective dimensionality for a feature config."""
+    feats = feature_config.get("features") or []
+    return int(sum(estimate_feature_effective_dim(f) for f in feats))
+
+
+def compute_dimensionality_budget(n_train: int) -> int:
+    """
+    Compute a hard cap on effective feature dimensionality (post one-hot).
+    
+    Heuristic: ~0.25 * n_train, clamped to [12, 25].
+    - n_train=74 -> 18
+    - n_train=50 -> 12
+    """
+    return int(max(12, min(25, round(0.25 * n_train))))
+
+
+def top_feature_column_costs(
+    X: pd.DataFrame,
+    raw_features: pd.DataFrame,
+    top_k: int = 10,
+) -> list[tuple[str, int]]:
+    """
+    Given a post-encoding design matrix X and the raw extracted features dataframe,
+    estimate how many encoded columns each raw feature contributes.
+    """
+    costs: dict[str, int] = {}
+    for col in raw_features.columns:
+        # categorical features become <col>_<value> dummy columns
+        if pd.api.types.is_object_dtype(raw_features[col]) or pd.api.types.is_string_dtype(raw_features[col]):
+            prefix = f"{col}_"
+            costs[col] = int(sum(1 for c in X.columns if str(c).startswith(prefix)))
+        else:
+            costs[col] = int(1 if col in X.columns else 0)
+
+    return sorted(costs.items(), key=lambda kv: (-kv[1], kv[0]))[:top_k]
+
+
+def enforce_dimensionality_budget_on_config(
+    feature_config: dict,
+    budget: int,
+) -> tuple[dict, dict]:
+    """
+    Enforce an effective dimensionality budget on a *feature config* by pruning
+    the highest-cost features (categoricals first).
+    
+    Returns (new_config, info) where info contains any auto removals.
+    """
+    new_config = copy.deepcopy(feature_config)
+    feats = list(new_config.get("features") or [])
+    
+    def cost(f: dict) -> int:
+        return estimate_feature_effective_dim(f)
+    
+    info = {
+        "auto_removed_for_budget": [],  # feature names
+        "estimated_dim_before": estimate_config_effective_dim({"features": feats}),
+        "estimated_dim_after": None,
+        "budget": int(budget),
+    }
+    
+    # Remove highest-cost features until within budget.
+    # Prefer removing categoricals, then scales, then bools.
+    def removal_priority(f: dict) -> tuple[int, int]:
+        # higher is removed first
+        ftype = f.get("type", "unknown")
+        ftype_rank = 2 if ftype == "categorical" else 1 if ftype == "scale" else 0
+        return (ftype_rank, cost(f))
+    
+    while estimate_config_effective_dim({"features": feats}) > budget and feats:
+        feats_sorted = sorted(feats, key=lambda f: (removal_priority(f)[0], removal_priority(f)[1]), reverse=True)
+        to_remove = feats_sorted[0]
+        feats = [f for f in feats if f is not to_remove]
+        info["auto_removed_for_budget"].append(to_remove.get("name", "unknown"))
+    
+    new_config["features"] = feats
+    info["estimated_dim_after"] = estimate_config_effective_dim(new_config)
+    return new_config, info
+
 
 def get_predictions_with_details(
     features_df: pd.DataFrame,
@@ -576,6 +693,8 @@ class IterativeImprover:
         validation_size: int = 100,  # Size of fixed validation set
         test_size: int = 200,  # Size of held-out test set
         n_train_folds: int = 5,  # Number of different train samples to rotate through
+        broad_analysis: bool = True,  # Run one-time broad pattern discovery
+        broad_analysis_sample_size: int = 200,  # Number of posts for broad discovery
     ):
         self.client = OpenAI()
         self.data_path = data_path
@@ -586,6 +705,9 @@ class IterativeImprover:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         self.validation_split = validation_split
+        self.broad_analysis = broad_analysis
+        self.broad_analysis_sample_size = broad_analysis_sample_size
+        self.broad_patterns: list[str] | None = None
         
         # Load data
         full_df = load_data(data_path)
@@ -626,6 +748,75 @@ class IterativeImprover:
         self._log_initialization()
         
         self._print_init_summary()
+    
+    def discover_broad_patterns(self) -> list[str]:
+        """
+        One-time broad pattern discovery (Part 2.1).
+        
+        Uses a larger sample (100-200) of posts (text + verdict only) to produce
+        stable domain priors that ground per-iteration error analysis and feature proposals.
+        """
+        if self.broad_patterns is not None:
+            return self.broad_patterns
+        
+        if not self.broad_analysis:
+            self.broad_patterns = []
+            return self.broad_patterns
+        
+        # Choose source pool for sampling:
+        # - validation split: sample from the *train pool* to avoid contaminating test
+        # - legacy: sample from the working df
+        if self.validation_split and self.train_pool is not None:
+            pool = self.train_pool
+        else:
+            pool = self.df
+        
+        n = min(self.broad_analysis_sample_size, len(pool))
+        # Stratified sample for stability
+        sample_df = self._stratified_sample(pool, n, random_state=2026)
+        
+        examples = []
+        for _, row in sample_df.iterrows():
+            text = str(row["body"])
+            verdict = str(row["verdict"])
+            # keep text short to control token usage
+            if len(text) > 500:
+                text = text[:500] + "..."
+            examples.append(f"- VERDICT: {verdict}\n  TEXT: {text}")
+        
+        prompt = f"""You are analyzing Reddit AITA posts to find broad, general patterns that distinguish verdicts.
+
+IMPORTANT: Verdict labels reflect CROWD CONSENSUS (Reddit commenters), not objective moral truth.
+We want patterns that predict crowd perception.
+
+You will see {len(sample_df)} posts. Produce 10-15 patterns that are:
+- General across many situations (not "wedding" / "roommate food theft" level specificity)
+- Concrete and actionable (phrased as observable signals in the text)
+- Focused on crowd perception (framing, tone, norm violations, power, boundary setting, receipts, etc.)
+
+POSTS:
+{chr(10).join(examples)}
+"""
+        response = self.client.responses.parse(
+            model=self.analysis_model,
+            input=[
+                {
+                    "role": "system",
+                    "content": "You are a careful social-science style analyst. Extract generalizable patterns predicting Reddit crowd consensus. Avoid overfitting to specific topics.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            text_format=BroadPatternDiscovery,
+        )
+        
+        parsed = response.output_parsed
+        patterns = parsed.patterns if parsed is not None else []
+        # sanitize: keep 15 max to control prompt bloat later
+        patterns = [p.strip() for p in patterns if p and p.strip()][:15]
+        
+        self.broad_patterns = patterns
+        self.verbose_logger.log_broad_patterns(patterns, sample_size=len(sample_df))
+        return patterns
     
     def _log_initialization(self):
         """Log initialization to verbose log file."""
@@ -730,8 +921,8 @@ class IterativeImprover:
             feature_config=feature_config,
             model=self.extraction_model,
             use_cache=True,  # Enable caching to avoid re-extracting unchanged features
-            max_concurrent=20,
-            requests_per_minute=500,
+            max_concurrent=30,
+            requests_per_minute=1200,
         )
         
         results = distiller.run(
@@ -756,8 +947,8 @@ class IterativeImprover:
             feature_config=feature_config,
             model=self.extraction_model,
             use_cache=True,
-            max_concurrent=20,
-            requests_per_minute=500,
+            max_concurrent=30,
+            requests_per_minute=1200,
         )
         
         features_df = distiller.extract_batch(df, text_col="body")
@@ -965,6 +1156,9 @@ class IterativeImprover:
         correct_samples = "\n".join(format_sample_for_prompt(row) for _, row in correct.iterrows())
         incorrect_samples = "\n".join(format_sample_for_prompt(row) for _, row in incorrect.iterrows())
         
+        broad_patterns = self.broad_patterns or []
+        broad_patterns_text = "\n".join(f"- {p}" for p in broad_patterns) if broad_patterns else "(none)"
+        
         prompt = f"""Analyze these classification results from an AITA verdict prediction model.
 
 IMPORTANT CONTEXT: The verdict labels (NTA, YTA, etc.) are NOT objective moral truth.
@@ -973,14 +1167,20 @@ Our goal is to predict what the crowd will say, not what is objectively "right."
 The crowd may have biases, respond to certain writing styles, sympathize with certain
 framings, or follow patterns that don't align with an objective moral assessment.
 
+GROUNDING: Broad patterns discovered earlier in this session (use these as priors; do not invent elaborate theories from 10 samples):
+{broad_patterns_text}
+
 CORRECTLY CLASSIFIED SAMPLES:
 {correct_samples}
 
 INCORRECTLY CLASSIFIED SAMPLES:
 {incorrect_samples}
 
-Analyze what patterns distinguish correct from incorrect predictions.
-Focus on what signals might be missing that could help predict CROWD PERCEPTION.
+Focused error analysis task:
+- Given the broad patterns above, what signals are likely missing or poorly captured by the current feature set?
+- What differences distinguish correct from incorrect predictions here?
+- Be cautious: you only saw ~10 samples; prefer hypotheses that align with broad patterns.
+
 Consider: How does the poster frame themselves? What narrative techniques do they use?
 What might make the crowd sympathetic or unsympathetic, regardless of objective merit?
 The current features are extracted values shown above (e.g., self_awareness, empathy_shown, etc.).
@@ -1001,6 +1201,10 @@ The current features are extracted values shown above (e.g., self_awareness, emp
         self,
         results: dict,
         sample_analysis: SampleAnalysis,
+        *,
+        effective_dimensionality: int | None = None,
+        dimensionality_budget: int | None = None,
+        top_column_costs: list[tuple[str, int]] | None = None,
     ) -> IterationAnalysis:
         """Use LLM to evaluate current features and propose improvements."""
         
@@ -1016,6 +1220,23 @@ The current features are extracted values shown above (e.g., self_awareness, emp
             for f in self.current_features["features"]
         )
         
+        broad_patterns = self.broad_patterns or []
+        broad_patterns_text = "\n".join(f"- {p}" for p in broad_patterns) if broad_patterns else "(none)"
+        
+        dim_line = ""
+        if effective_dimensionality is not None and dimensionality_budget is not None:
+            remaining = dimensionality_budget - effective_dimensionality
+            dim_line = (
+                f"- Effective dimensionality (post one-hot): {effective_dimensionality} columns\n"
+                f"- Dimensionality budget (hard cap): {dimensionality_budget} columns\n"
+                f"- Remaining budget: {remaining:+d} columns\n"
+            )
+        
+        cost_lines = ""
+        if top_column_costs:
+            cost_lines = "\n".join(f"  - {name}: {cost} cols" for name, cost in top_column_costs)
+            cost_lines = f"Top per-feature column costs (post-encoding):\n{cost_lines}\n"
+        
         prompt = f"""Evaluate this iteration's results and propose feature improvements.
 
 IMPORTANT CONTEXT: The verdict labels (NTA, YTA, etc.) are NOT objective moral truth.
@@ -1024,6 +1245,11 @@ Our goal is to predict what the crowd will say, not what is objectively "right."
 The crowd may have biases, respond to certain writing styles, sympathize with certain
 framings, or follow patterns that don't align with an objective moral assessment.
 Features should capture what ACTUALLY influences crowd perception.
+
+{dim_line}{cost_lines}
+
+Broad domain patterns discovered earlier (ground your proposals in these; avoid overfitting to the 10 sample-analysis posts):
+{broad_patterns_text}
 
 CURRENT PERFORMANCE:
 - CV Accuracy: {results['results']['cv_accuracy_mean']:.3f} (±{results['results']['cv_accuracy_std']:.3f})
@@ -1043,13 +1269,15 @@ SAMPLE ANALYSIS INSIGHTS:
 
 TASK:
 1. Evaluate each feature's usefulness based on its coefficient and the sample analysis
-2. Identify up to {self.max_swaps} features to swap out (prioritize features with low coefficients that aren't capturing useful signal)
-3. Propose replacement features that address the missing signals identified
+2. Identify up to {self.max_swaps} features to REMOVE (prioritize features with low coefficients and/or high dimensionality cost)
+3. Propose up to {self.max_swaps} features to ADD that address the missing signals identified
 4. Each replacement feature should be well-defined and extractable from text
 
 Rules for proposed features:
 - Use snake_case names
-- For 'scale' type: include min_val (usually 1) and max_val (usually 5)
+- STRONGLY PREFER binary 'bool' features. Why: we're sample-size constrained, ordinal extraction is noisy, and logistic regression assumes linear effects for scales.
+- If you propose a 'scale', prefer 1-3 scales unless there is a clear continuous dimension that benefits from more granularity.
+- For 'scale' type: include min_val and max_val (prefer 1-3; use 1-5 only with justification)
 - For 'categorical' type: include a values list
 - For 'bool' type: just include the description
 - Make descriptions specific enough for consistent extraction
@@ -1059,10 +1287,11 @@ Rules for proposed features:
   * What narrative techniques might sway crowd opinion?
   * What biases or patterns does the Reddit crowd tend to exhibit?
 - AVOID overly specific or sparse features that would only apply to a small subset of samples (e.g., "happened_in_nevada", "involves_wedding"). Prefer features that capture general behavioral/psychological patterns applicable across many situations.
-- STRONGLY PREFER scale or bool types over categorical. We are sample-size constrained due to evaluation costs, and high-cardinality categoricals blow up the feature space (each category becomes a separate one-hot column), reducing statistical power.
+- STRONGLY PREFER bool > scale >>> categorical. We are sample-size constrained and high-cardinality categoricals blow up the feature space (each category becomes a separate one-hot column), reducing statistical power.
   * If you want to capture "is any of these patterns present", use a BOOL, not a categorical listing them all.
   * If you must use categorical, limit to 2-4 broad buckets maximum (e.g., "low/medium/high" or "self/other/mutual").
   * A categorical with 5+ values is almost never appropriate for this problem.
+- Respect the dimensionality budget: if we're over budget, prioritize net REMOVALS and dropping expensive categoricals; if under budget, you may add features, but keep within the remaining budget.
 - AVOID these already-tried feature names: {', '.join(self.tried_features) if self.tried_features else 'none'}
 """
         
@@ -1080,6 +1309,8 @@ Rules for proposed features:
     def apply_feature_changes(
         self,
         analysis: IterationAnalysis,
+        *,
+        dimensionality_budget: int | None = None,
     ) -> dict:
         """Apply the proposed feature changes to create a new feature config."""
         
@@ -1092,9 +1323,12 @@ Rules for proposed features:
             if f["name"] not in features_to_remove
         ]
         
-        # Add proposed features
-        for proposed in analysis.proposed_features[:len(features_to_remove)]:
+        # Add proposed features (variable count; no forced 1:1 swap)
+        for proposed in analysis.proposed_features[: self.max_swaps]:
             new_feature = feature_config_to_dict(proposed.model_dump())
+            # Avoid accidental duplicates
+            if any(f.get("name") == new_feature["name"] for f in new_config["features"]):
+                continue
             new_config["features"].append(new_feature)
             # Track this feature so we don't re-propose it
             self.tried_features.add(proposed.name)
@@ -1103,6 +1337,17 @@ Rules for proposed features:
         iteration_num = len(self.history) + 1
         new_config["name"] = f"AITAFeatures_iter{iteration_num}"
         
+        # Enforce dimensionality budget for next iteration (Part 2.2 / 2.4)
+        budget_info = {}
+        if dimensionality_budget is not None:
+            new_config, budget_info = enforce_dimensionality_budget_on_config(new_config, dimensionality_budget)
+            # If we auto-removed features, also add them to tried_features so we don't re-add immediately
+            for fname in budget_info.get("auto_removed_for_budget", []):
+                if fname:
+                    self.tried_features.add(fname)
+        
+        # Attach budget info for caller to record/log if desired
+        new_config["_budget_info"] = budget_info
         return new_config
     
     def run_iteration(self, iteration_num: int) -> dict:
@@ -1148,6 +1393,17 @@ Rules for proposed features:
         print("\n[3/5] Fitting model and evaluating...")
         train_labels = train_df.set_index("id")["verdict"]
         val_labels = self.validation_df.set_index("id")["verdict"]
+        
+        # Compute effective dimensionality + budget (post one-hot) for this fold
+        X_train_tmp, _ = SemanticDistiller.build_feature_matrix(train_features)
+        effective_dim = int(X_train_tmp.shape[1])
+        dim_budget = compute_dimensionality_budget(n_train=len(train_features))
+        costs_top = top_feature_column_costs(X_train_tmp, train_features, top_k=10)
+        if effective_dim > dim_budget:
+            logging.getLogger("distill").warning(
+                f"Effective dimensionality {effective_dim} exceeds budget {dim_budget}. "
+                "Expect overfitting; the next iteration should prioritize net removals / cheaper features."
+            )
         
         eval_results, fitted_model = self.fit_and_evaluate_split(
             train_features, train_labels,
@@ -1259,7 +1515,13 @@ Rules for proposed features:
             "features": [c['feature'] for c in eval_results['coefficients']],
         }
         
-        iteration_analysis = self.evaluate_and_propose_features(results_for_analysis, sample_analysis)
+        iteration_analysis = self.evaluate_and_propose_features(
+            results_for_analysis,
+            sample_analysis,
+            effective_dimensionality=effective_dim,
+            dimensionality_budget=dim_budget,
+            top_column_costs=costs_top,
+        )
         print(f"      Summary: {iteration_analysis.summary}")
         print(f"      Features to remove: {iteration_analysis.features_to_remove}")
         print(f"      Features to add: {[f.name for f in iteration_analysis.proposed_features]}")
@@ -1280,7 +1542,11 @@ Rules for proposed features:
         self.verbose_logger.log_iteration_summary(iteration_analysis.summary)
         
         # Apply changes for next iteration
-        new_features = self.apply_feature_changes(iteration_analysis)
+        new_features = self.apply_feature_changes(
+            iteration_analysis,
+            dimensionality_budget=dim_budget,
+        )
+        budget_info = new_features.pop("_budget_info", {}) if isinstance(new_features, dict) else {}
         
         # Record history
         iteration_record = {
@@ -1293,6 +1559,10 @@ Rules for proposed features:
             "val_accuracy": eval_results['val_accuracy'],
             "n_train": eval_results['n_train'],
             "n_val": eval_results['n_val'],
+            "effective_dimensionality": effective_dim,
+            "dimensionality_budget": dim_budget,
+            "estimated_config_effective_dim": estimate_config_effective_dim(self.current_features),
+            "budget_enforcement": budget_info,
             "per_class_metrics": per_class_metrics,
             "extraction_cost": total_cost,
             "sample_analysis": {
@@ -1388,7 +1658,13 @@ Rules for proposed features:
         
         # Step 4: Evaluate features and propose changes
         print("\n[4/4] Evaluating features and proposing changes...")
-        iteration_analysis = self.evaluate_and_propose_features(results, sample_analysis)
+        iteration_analysis = self.evaluate_and_propose_features(
+            results,
+            sample_analysis,
+            effective_dimensionality=effective_dim,
+            dimensionality_budget=dim_budget,
+            top_column_costs=costs_top,
+        )
         print(f"      Summary: {iteration_analysis.summary}")
         print(f"      Features to remove: {iteration_analysis.features_to_remove}")
         print(f"      Features to add: {[f.name for f in iteration_analysis.proposed_features]}")
@@ -1409,7 +1685,23 @@ Rules for proposed features:
         self.verbose_logger.log_iteration_summary(iteration_analysis.summary)
         
         # Apply changes for next iteration
-        new_features = self.apply_feature_changes(iteration_analysis)
+        # Budget derived from current extracted feature matrix size if available
+        effective_dim = None
+        dim_budget = None
+        costs_top = None
+        try:
+            X_tmp, _ = SemanticDistiller.build_feature_matrix(features_df)
+            effective_dim = int(X_tmp.shape[1])
+            dim_budget = compute_dimensionality_budget(n_train=len(features_df))
+            costs_top = top_feature_column_costs(X_tmp, features_df, top_k=10)
+        except Exception:
+            pass
+        
+        new_features = self.apply_feature_changes(
+            iteration_analysis,
+            dimensionality_budget=dim_budget,
+        )
+        budget_info = new_features.pop("_budget_info", {}) if isinstance(new_features, dict) else {}
         
         # Record history
         iteration_record = {
@@ -1419,6 +1711,10 @@ Rules for proposed features:
             "cv_accuracy": accuracy,
             "cv_std": results["results"]["cv_accuracy_std"],
             "train_accuracy": n_correct / n_total,
+            "effective_dimensionality": effective_dim,
+            "dimensionality_budget": dim_budget,
+            "estimated_config_effective_dim": estimate_config_effective_dim(self.current_features),
+            "budget_enforcement": budget_info,
             "per_class_metrics": per_class_metrics,
             "sample_analysis": {
                 "correct_patterns": sample_analysis.correct_patterns,
@@ -1469,6 +1765,15 @@ Rules for proposed features:
         else:
             print(f"# Evaluation strategy: single sample (legacy)")
         print(f"{'#'*60}")
+        
+        # Part 2.1: One-time broad pattern discovery (pre-loop)
+        if self.broad_analysis:
+            print("\nRunning broad pattern discovery (pre-loop)...")
+            try:
+                patterns = self.discover_broad_patterns()
+                print(f"Discovered {len(patterns)} broad patterns.")
+            except Exception as e:
+                print(f"Broad pattern discovery failed (continuing without it): {e}")
         
         for i in range(1, n_iterations + 1):
             try:
@@ -1688,6 +1993,15 @@ Examples:
         help="Number of train folds to rotate through (default: 5). Only used with --validation-split"
     )
     
+    parser.add_argument(
+        "--no-broad-analysis", action="store_true",
+        help="Disable one-time broad pattern discovery (Part 2.1)."
+    )
+    parser.add_argument(
+        "--broad-analysis-sample-size", type=int, default=200,
+        help="Number of posts for broad pattern discovery (default: 200)."
+    )
+    
     args = parser.parse_args()
     
     improver = IterativeImprover(
@@ -1701,6 +2015,8 @@ Examples:
         validation_size=args.val_size,
         test_size=args.test_size,
         n_train_folds=args.n_folds,
+        broad_analysis=not args.no_broad_analysis,
+        broad_analysis_sample_size=args.broad_analysis_sample_size,
     )
     
     improver.run(args.iterations)

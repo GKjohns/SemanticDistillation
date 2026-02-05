@@ -43,12 +43,12 @@ The features we extract should capture what **actually influences crowd percepti
 git clone https://github.com/yourusername/SemanticDistillation.git
 cd SemanticDistillation
 
-# Create virtual environment
+# Create + activate a virtual environment (recommended)
 python3 -m venv venv
 source venv/bin/activate
 
 # Install dependencies
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 
 # Set your OpenAI API key
 export OPENAI_API_KEY=sk-...
@@ -59,17 +59,20 @@ export OPENAI_API_KEY=sk-...
 The project includes a comprehensive test suite covering all core functionality:
 
 ```bash
+# Make sure your venv is active first
+source venv/bin/activate
+
 # Run all tests
-pytest
+python -m pytest
 
 # Run with verbose output
-pytest -v
+python -m pytest -v
 
 # Run specific test file
-pytest tests/test_schemas.py
+python -m pytest tests/test_schemas.py
 
 # Run tests matching a pattern
-pytest -k "cache"
+python -m pytest -k "cache"
 ```
 
 The test suite includes:
@@ -91,8 +94,8 @@ python -m src.semantic_distillation --sample-size 100
 # Use cached extractions to avoid re-calling the API
 python -m src.semantic_distillation --use-cache
 
-# Parallel extraction with rate limiting (default: 20 concurrent, 500 rpm)
-python -m src.semantic_distillation --max-concurrent 20 --rpm 500
+# Parallel extraction with rate limiting (default: 30 concurrent, 1200 rpm)
+python -m src.semantic_distillation --max-concurrent 30 --rpm 1200
 
 # Use a different model
 python -m src.semantic_distillation --model gpt-5
