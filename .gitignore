@@ -205,3 +205,16 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Project-specific ignores
+# LLM response cache
+cache/
+
+# Run logs and results
+logs/
+
+# Iterative improvement logs
+iteration_logs/
+
+# Large dataset files
+*.sqlite
