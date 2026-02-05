@@ -150,11 +150,21 @@ Cross-validation accuracy: 0.725 (±0.045)
 
 Interpretation: Posts where the author shows proportional responses and empathy are more likely to receive NTA verdicts, while high emotional intensity correlates with YTA verdicts.
 
-## Prior Art
+## Related Work
 
-This implementation draws inspiration from:
-- **FELIX** (Malberg et al. 2024) - LLM-based feature extraction for tabular data
-- **CAAFE** (Hollmann et al. 2024) - Context-aware automated feature engineering
+This implementation draws inspiration from recent work on LLM-powered feature engineering:
+
+**FELIX: Automatic and Interpretable Feature Engineering Using LLMs**
+Simon Malberg, Edoardo Mosca, Georg Groh. ECML PKDD 2024.
+[Paper](https://link.springer.com/chapter/10.1007/978-3-031-70359-1_14) | [Code](https://github.com/simonmalberg/felix)
+
+FELIX uses LLMs to automatically generate human-interpretable features from text, demonstrating that structured feature extraction can outperform both traditional methods (TF-IDF) and LLM embeddings on text classification tasks.
+
+**CAAFE: Context-Aware Automated Feature Engineering**
+Noah Hollmann, Samuel Müller, Frank Hutter. NeurIPS 2023.
+[arXiv:2305.03403](https://arxiv.org/abs/2305.03403) | [Code](https://github.com/automl/CAAFE)
+
+CAAFE uses LLMs to iteratively generate semantically meaningful features for tabular datasets based on dataset descriptions, producing both Python code and explanations for generated features.
 
 ## License
 
