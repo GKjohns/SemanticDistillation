@@ -453,6 +453,20 @@ def get_predictions_with_details(
     reverse_map = {v: k for k, v in label_map.items()}
     y_enc = y.map(label_map)
     
+    # Guard: need at least 2 classes to fit logistic regression
+    if len(label_map) < 2:
+        majority_label = y.value_counts().idxmax()
+        results = pd.DataFrame({
+            "text": texts.values,
+            "true_label": y.values,
+            "predicted_label": [majority_label] * len(y),
+            "correct": [True] * len(y),
+            "confidence": [1.0] * len(y),
+        }, index=common_idx)
+        for col in features_df.columns:
+            results[f"feat_{col}"] = features_df.loc[common_idx, col].values
+        return results
+    
     # Fit model and get predictions
     pipe = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
@@ -605,6 +619,7 @@ class IterativeImprover:
         self.best_model = None
         self.best_val_accuracy = 0.0
         self.best_features = None
+        self.best_feature_columns = None  # Store the column names used in training
         
         # Initialize verbose logger
         self.verbose_logger = VerboseLogger(self.output_dir, self.session_id)
@@ -780,13 +795,18 @@ class IterativeImprover:
         y_train = train_labels.map(label_map)
         y_val = val_labels.map(label_map)
         
+        # Determine safe number of CV splits based on smallest class count
+        min_class_count = min(y_train.value_counts())
+        safe_inner_cv = max(2, min(3, min_class_count))
+        safe_outer_cv = max(2, min(5, min_class_count, len(y_train) // 2))
+        
         # Fit model on train
         pipe = Pipeline([
             ("imputer", SimpleImputer(strategy="median")),
             ("scaler", StandardScaler()),
             ("model", LogisticRegressionCV(
                 Cs=[0.01, 0.1, 1.0, 10.0],
-                cv=3,
+                cv=safe_inner_cv,
                 l1_ratios=(0.5,),
                 solver="saga",
                 max_iter=5000,
@@ -801,7 +821,7 @@ class IterativeImprover:
         val_accuracy = (val_preds == y_val.values).mean()
         
         # Also get CV score on train for comparison
-        cv = StratifiedKFold(n_splits=min(5, len(y_train) // 2), shuffle=True, random_state=42)
+        cv = StratifiedKFold(n_splits=safe_outer_cv, shuffle=True, random_state=42)
         train_cv_scores = cross_val_score(pipe, X_train, y_train, cv=cv, scoring="accuracy")
         
         # Get coefficients
@@ -824,6 +844,7 @@ class IterativeImprover:
             "n_nonzero_features": int((np.abs(coefs) > 1e-6).sum()),
             "regularization_C": float(model.C_[0]),
             "label_map": label_map,
+            "feature_columns": list(X_train.columns),  # Store column names for later use
         }
         
         return results, pipe
@@ -845,7 +866,9 @@ class IterativeImprover:
         X_test, _ = SemanticDistiller.build_feature_matrix(test_features)
         
         # Ensure test has same columns as model was trained on
-        model_features = model.named_steps["scaler"].feature_names_in_
+        if self.best_feature_columns is None:
+            raise RuntimeError("best_feature_columns not set. Model must be trained first.")
+        model_features = self.best_feature_columns
         missing_cols = set(model_features) - set(X_test.columns)
         for col in missing_cols:
             X_test[col] = 0
@@ -1107,6 +1130,7 @@ Rules for proposed features:
             self.best_val_accuracy = eval_results['val_accuracy']
             self.best_model = fitted_model
             self.best_features = copy.deepcopy(self.current_features)
+            self.best_feature_columns = eval_results['feature_columns']
             print(f"      ★ New best validation accuracy!")
         
         # Log evaluation results to verbose log
