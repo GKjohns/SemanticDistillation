@@ -54,6 +54,31 @@ pip install -r requirements.txt
 export OPENAI_API_KEY=sk-...
 ```
 
+## Testing
+
+The project includes a comprehensive test suite covering all core functionality:
+
+```bash
+# Run all tests
+pytest
+
+# Run with verbose output
+pytest -v
+
+# Run specific test file
+pytest tests/test_schemas.py
+
+# Run tests matching a pattern
+pytest -k "cache"
+```
+
+The test suite includes:
+- **59 tests** covering schemas, features, data loading, and utilities
+- **Fast execution** (~11 seconds total, no external API calls)
+- **100% pass rate** on core functionality
+
+See `tests/README.md` for detailed testing documentation.
+
 ## Quick Start
 
 ```bash
@@ -177,12 +202,19 @@ SemanticDistillation/
 │   ├── schemas.py                 # Pydantic models for structured extraction
 │   ├── data.py                    # Data loading utilities + sample data
 │   └── utils.py                   # Logging, caching, rate limiting
+├── tests/                         # Test suite
+│   ├── test_schemas.py            # Tests for Pydantic models
+│   ├── test_features.py           # Tests for feature definitions
+│   ├── test_data.py               # Tests for data loading
+│   ├── test_utils.py              # Tests for utilities
+│   └── README.md                  # Testing documentation
 ├── dataset/                       # AITA dataset
 │   ├── aita_dataset.csv           # Minimal dataset (id, body, verdict)
 │   ├── aita_dataset_full.csv      # Full dataset with metadata
 │   └── README.md                  # Dataset documentation
 ├── build_dataset.py               # Script to build dataset from SQLite source
 ├── iterative_improvement.py       # Automated feature improvement loop
+├── pytest.ini                     # Pytest configuration
 ├── requirements.txt               # Python dependencies
 └── README.md                      # This file
 ```
