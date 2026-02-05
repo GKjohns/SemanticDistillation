@@ -89,6 +89,7 @@ def load_data(
     path: str | None = None,
     text_col: str = "body",
     label_col: str = "verdict",
+    binary_labels: bool = True,
 ) -> pd.DataFrame:
     """
     Load data from CSV or return sample data if no path provided.
@@ -97,6 +98,9 @@ def load_data(
         path: Path to CSV file, or None to use sample data
         text_col: Name of the text column (for validation)
         label_col: Name of the label column (for validation)
+        binary_labels: If True, convert to binary NTA/YTA classification:
+                       - NAH (No Assholes Here) → NTA (poster is not at fault)
+                       - ESH (Everyone Sucks Here) → dropped (ambiguous)
     
     Returns:
         DataFrame with the loaded data
@@ -110,5 +114,18 @@ def load_data(
         raise ValueError(f"Text column '{text_col}' not found in data")
     if label_col not in df.columns:
         raise ValueError(f"Label column '{label_col}' not found in data")
+    
+    if binary_labels and label_col in df.columns:
+        original_len = len(df)
+        
+        # Map NAH → NTA (No Assholes Here means poster is not at fault)
+        df[label_col] = df[label_col].replace({"NAH": "NTA"})
+        
+        # Drop ESH (Everyone Sucks Here is ambiguous for binary classification)
+        df = df[df[label_col] != "ESH"].reset_index(drop=True)
+        
+        dropped = original_len - len(df)
+        if dropped > 0:
+            print(f"Binary labels: mapped NAH→NTA, dropped {dropped} ESH samples ({dropped/original_len*100:.1f}%)")
     
     return df
