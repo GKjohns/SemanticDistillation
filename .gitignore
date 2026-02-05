@@ -215,6 +215,7 @@ logs/
 
 # Iterative improvement logs
 iteration_logs/
+demo_run/
 
 # Large dataset files
 *.sqlite
